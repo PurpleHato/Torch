@@ -19,6 +19,7 @@ option(BUILD_PM64 "Build with Paper Mario support" ON)
 option(BUILD_FZERO "Build with F-Zero X support" ON)
 option(BUILD_MARIO_ARTIST "Build with Mario Artist support" ON)
 option(BUILD_NAUDIO "Build with NAudio support" ON)
+option(BUILD_DKR "Build with Diddy Kong Racing support" ON)
 
 if(EMSCRIPTEN)
     set(BUILD_SM64 OFF) # TODO: This is broken for some reason
@@ -113,6 +114,12 @@ if(BUILD_NAUDIO)
     add_definitions(-DNAUDIO_SUPPORT)
 else()
     list(FILTER SRC_DIR EXCLUDE REGEX "${CMAKE_CURRENT_SOURCE_DIR}/src/factories/naudio/*")
+endif()
+
+if(BUILD_DKR)
+    add_definitions(-DDKR_SUPPORT)
+else()
+    list(FILTER SRC_DIR EXCLUDE REGEX "${CMAKE_CURRENT_SOURCE_DIR}/src/factories/dkr/*")
 endif()
 
 if(ENABLE_ASAN)

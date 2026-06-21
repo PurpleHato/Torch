@@ -36,7 +36,8 @@ enum class GBIMinorVersion {
     None,
     Mk64,
     SM64,
-    PM64
+    PM64,
+    DKR
 };
 
 enum class TableMode {

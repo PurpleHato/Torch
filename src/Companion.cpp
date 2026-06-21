@@ -28,6 +28,7 @@
 #include "factories/AssetArrayFactory.h"
 #include "factories/ViewportFactory.h"
 #include "factories/CompressedTextureFactory.h"
+#include "factories/dkr/DKRAssetTableFactory.h"
 
 #ifdef SM64_SUPPORT
 #include "factories/sm64/AnimationFactory.h"
@@ -167,6 +168,11 @@ void Companion::Init(const ExportType type, std::atomic<size_t>& assetCount) {
     this->RegisterFactory("ASSET_ARRAY", std::make_shared<AssetArrayFactory>());
     this->RegisterFactory("VP", std::make_shared<ViewportFactory>());
     this->RegisterFactory("COMPRESSED_TEXTURE", std::make_shared<CompressedTextureFactory>());
+
+#ifdef DKR_SUPPORT
+    this->RegisterFactory("DKR:ASSET_TABLE", std::make_shared<DKRAssetTableFactory>());
+    this->RegisterFactory("DKR:ASSET", std::make_shared<BlobFactory>());
+#endif
 
 #ifdef SM64_SUPPORT
     this->RegisterFactory("SM64:DIALOG", std::make_shared<SM64::DialogFactory>());
@@ -1222,6 +1228,9 @@ void Companion::Process(std::atomic<size_t>& assetCount) {
         } else if (key == "F3DEX_MK64") {
             this->gConfig.gbi.version = GBIVersion::f3dex;
             this->gConfig.gbi.subversion = GBIMinorVersion::Mk64;
+        } else if (key == "F3DDKR") {
+            this->gConfig.gbi.version = GBIVersion::f3dex;
+            this->gConfig.gbi.subversion = GBIMinorVersion::DKR;
         } else {
             SPDLOG_ERROR("Invalid GBI version");
             return;
