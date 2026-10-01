@@ -104,6 +104,21 @@ enum class ResourceType {
     AdpcmLoop = 0x4150434C,    // APCL
     AdpcmBook = 0x41504342,    // APCB
     Envelope = 0x45564C50,     // EVLP
-    AudioTable = 0x4154424C    // ATBL
+    AudioTable = 0x4154424C,   // ATBL
+
+    // DKR (raw-bin assets o2r-ized from the extracted .vanilla tree)
+    DKRModel = 0x444B4D4F,            // DKMO
+    DKRLevelModel = 0x444B4C4D,       // DKLM
+    DKRAudio = 0x444B4155,            // DKAU
+    DKRParticle = 0x444B5041,         // DKPA
+    DKRParticleBehavior = 0x444B5042, // DKPB
+    DKRTTGhost = 0x444B5447,          // DKTG
+    DKRMisc = 0x444B4D53,             // DKMS
+    DKRLevelObjectMap = 0x444B4F4D,   // DKOM
+    DKRTexture = 0x444B5458,          // DKTX
+    DKRSprite = 0x444B5350,           // DKSP
+    DKRLevelHeader = 0x444B4C48,      // DKLH
+    DKRObjectHeader = 0x444B4F48,     // DKOH
+    DKRMenuText = 0x444B4D54          // DKMT
 };
 } // namespace Torch

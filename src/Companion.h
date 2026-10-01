@@ -40,7 +40,8 @@ enum class GBIMinorVersion {
     SM64,
     PM64,
     OoT,
-    BK64
+    BK64,
+    DKR
 };
 
 enum class TableMode {
@@ -187,6 +188,10 @@ public:
     std::string GetOutputPath() { return this->gConfig.outputPath; }
     const std::string& GetAssetPath() const { return this->gAssetPath; }
     std::string GetDestRelativeOutputPath() { return RelativePathToDestDir(GetOutputPath()); }
+    // Set/get the current in-archive directory used when filing dispatched assets
+    // (so a master factory like DKR's can place sub-assets at exact archive paths).
+    void SetCurrentDirectory(const fs::path& dir) { gCurrentDirectory = dir; }
+    std::string GetCurrentDirectory() const { return gCurrentDirectory.generic_string(); }
 
     GBIVersion GetGBIVersion() const { return this->gConfig.gbi.version; }
     GBIMinorVersion GetGBIMinorVersion() const { return  this->gConfig.gbi.subversion; }
@@ -247,8 +252,12 @@ public:
 
     std::optional<std::tuple<std::string, YAML::Node>> RegisterAsset(const std::string& name, YAML::Node& node);
     std::optional<YAML::Node> AddSubFileAsset(YAML::Node asset, std::string newFileName, CompressionType newCompressionType, uint32_t compressedSize = 0);
+    // Like AddSubFileAsset but for assets carved from the ROM by absolute offset (e.g. DKR's
+    // FixedTable-dispatched sections) rather than from a parent file already loaded into VRAM.
+    // Registers the asset as a sub-file so both the parallel modding export and the binary
+    // packer reach it via gSubFileList, without zeroing its ROM offset.
+    std::optional<YAML::Node> AddSubFileAssetAbsolute(YAML::Node asset, std::string newFileName);
     std::optional<YAML::Node> AddAsset(YAML::Node asset);
-    std::string GetCurrentDirectory() const { return gCurrentDirectory.generic_string(); }
     void SetCompressedSegment(uint32_t segmentId, uint32_t compressedFileOffset, uint32_t offset);
     bool GetCompressedSegmentOffset(uint32_t* addr);
 

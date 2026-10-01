@@ -115,6 +115,16 @@
 #include "factories/bk64/SoundfontTblFactory.h"
 #endif
 
+#ifdef DKR_SUPPORT
+#include "factories/dkr/AssetTableFactory.h"
+#include "factories/dkr/AssetFactory.h"
+#include "factories/dkr/ObjectHeaderFactory.h"
+#include "factories/dkr/DKRTextureFactory.h"
+#include "factories/dkr/DKRSpriteFactory.h"
+#include "factories/dkr/LevelHeaderFactory.h"
+#include "factories/dkr/MenuTextFactory.h"
+#endif
+
 #ifdef MARIO_ARTIST_SUPPORT
 #include "factories/mario_artist/MA2D1Factory.h"
 #endif
@@ -288,6 +298,16 @@ void Companion::Init(const ExportType type, std::atomic<size_t>& assetCount, boo
     this->RegisterFactory("BK64:SOUNDFONT_CTL", std::make_shared<BK64::SoundfontCtlFactory>());
     this->RegisterFactory("BK64:SOUNDFONT_TBL", std::make_shared<BK64::SoundfontTblFactory>());
     this->RegisterFactory("BK64:SPRITE", std::make_shared<BK64::SpriteFactory>());
+#endif
+
+#ifdef DKR_SUPPORT
+    this->RegisterFactory("DKR:ASSET_TABLE", std::make_shared<AssetTableFactory>());
+    this->RegisterFactory("DKR:ASSET", std::make_shared<AssetFactory>());
+    this->RegisterFactory("DKR:OBJECT_HEADER", std::make_shared<ObjectHeaderFactory>());
+    this->RegisterFactory("DKR:TEXTURE", std::make_shared<DKRTextureFactory>());
+    this->RegisterFactory("DKR:SPRITE", std::make_shared<DKRSpriteFactory>());
+    this->RegisterFactory("DKR:LEVEL_HEADER", std::make_shared<LevelHeaderFactory>());
+    this->RegisterFactory("DKR:MENU_TEXT", std::make_shared<MenuTextFactory>());
 #endif
 
 #ifdef MARIO_ARTIST_SUPPORT
@@ -1480,6 +1500,9 @@ void Companion::Process(std::atomic<size_t>& assetCount) {
         } else if (key == "F3DEX_BK64") {
             this->gConfig.gbi.version = GBIVersion::f3dex;
             this->gConfig.gbi.subversion = GBIMinorVersion::BK64;
+        } else if (key == "F3DDKR") {
+            this->gConfig.gbi.version = GBIVersion::f3dex;
+            this->gConfig.gbi.subversion = GBIMinorVersion::DKR;
         } else {
             SPDLOG_ERROR("Invalid GBI version");
             return;
@@ -2490,6 +2513,26 @@ std::optional<YAML::Node> Companion::AddSubFileAsset(YAML::Node asset, std::stri
     this->gCurrentCompressionType = oldCompressionType;
     this->gCurrentCompressedSize = oldCompressedSize;
 
+    return result;
+}
+
+std::optional<YAML::Node> Companion::AddSubFileAssetAbsolute(YAML::Node asset, std::string newFileName) {
+    if (!asset["offset"] || !asset["type"]) {
+        return std::nullopt;
+    }
+    if (this->gParseResults.contains(newFileName) || this->gProcessedFiles.contains(newFileName)) {
+        SPDLOG_WARN("File with name {} already exists, skipping..", newFileName);
+        return std::nullopt;
+    }
+
+    // Register as a sub-file (keyed by its own name so the gSubFileList iteration finds it
+    // in gParseResults) and let AddAsset parse it. The ROM offset is left intact -- unlike
+    // AddSubFileAsset, which zeroes it for parent-relative VRAM addressing.
+    auto oldFile = this->gCurrentFile;
+    this->gSubFileList.push_back(newFileName);
+    this->gCurrentFile = newFileName;
+    auto result = this->AddAsset(asset);
+    this->gCurrentFile = oldFile;
     return result;
 }
 
