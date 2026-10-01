@@ -1,5 +1,8 @@
 #include "DialogFactory.h"
 
+#include "BKDialogShared.h"
+#include "BKEmitText.h"
+
 #include "Companion.h"
 #include "spdlog/spdlog.h"
 #include "types/RawBuffer.h"
@@ -9,23 +12,16 @@
 #define DIALOG_HEADER_1 0x01
 #define DIALOG_HEADER_2 0x03
 #define DIALOG_HEADER_3 0x00
+#define DIALOG_CMD_CLOSE 0x04
+#define DIALOG_TERMINATOR_SIZE 3
 
-#define FORMAT_HEX(x, w) \
-    std::hex << std::uppercase << std::setfill('0') << std::setw(w) << x << std::nouppercase << std::dec
-#define YAML_HEX(num) YAML::Hex << (num) << YAML::Dec
 
 namespace BK64 {
 
-ExportResult DialogHeaderExporter::Export(std::ostream& write, std::shared_ptr<IParsedData> raw, std::string& entryName,
-                                          YAML::Node& node, std::string* replacement) {
-    const auto symbol = GetSafeNode(node, "symbol", entryName);
-
-    if (Companion::Instance->IsOTRMode()) {
-        write << "static const ALIGN_ASSET(2) char " << symbol << "[] = \"__OTR__" << (*replacement) << "\";\n\n";
-        return std::nullopt;
-    }
-
-    return std::nullopt;
+static void WriteLangBlock(LUS::BinaryWriter& writer, const std::vector<DialogString>& bottom,
+                           const std::vector<DialogString>& top) {
+    WriteDialogStrings(writer, bottom);
+    WriteDialogStrings(writer, top);
 }
 
 ExportResult DialogCodeExporter::Export(std::ostream& write, std::shared_ptr<IParsedData> raw, std::string& entryName,
@@ -43,56 +39,13 @@ ExportResult DialogCodeExporter::Export(std::ostream& write, std::shared_ptr<IPa
           << "DIALOG_HEADER_3"
           << ",\n";
     write << fourSpaceTab << "/* Bottom Dialog */\n";
-    write << fourSpaceTab << dialog->mBottom.size() << ",\n";
-    for (const auto [cmd, str] : dialog->mBottom) {
-        write << fourSpaceTab << "0x" << FORMAT_HEX((uint32_t)cmd, 2) << ", " << str.length();
-        for (auto& c : str) {
-            if (c < ' ') {
-                write << ", 0x" << FORMAT_HEX((uint32_t)c, 2);
-            } else if (c == '\'') {
-                write << ", \'\\" << c << "\'";
-            } else {
-                write << ", \'" << c << "\'";
-            }
-        }
-        write << ",\n";
-    }
+    WriteDialogStringArray(write, dialog->mBottom);
     write << fourSpaceTab << "/* Top Dialog */\n";
-    write << fourSpaceTab << dialog->mTop.size() << ",\n";
-    for (const auto [cmd, str] : dialog->mTop) {
-        write << fourSpaceTab << "0x" << FORMAT_HEX((uint32_t)cmd, 2) << ", " << str.length();
-        for (auto& c : str) {
-            if (c < ' ') {
-                write << ", 0x" << FORMAT_HEX((uint32_t)c, 2);
-            } else if (c == '\'') {
-                write << ", \'\\" << c << "\'";
-            } else {
-                write << ", \'" << c << "\'";
-            }
-        }
-        write << ",\n";
-    }
+    WriteDialogStringArray(write, dialog->mTop);
 
     write << "};\n\n";
 
     return offset;
-}
-
-static void WriteLangBlock(LUS::BinaryWriter& writer, const std::vector<DialogString>& bottom,
-                           const std::vector<DialogString>& top) {
-    writer.Write((uint32_t)bottom.size());
-    for (const auto& dialogString : bottom) {
-        writer.Write(dialogString.cmd);
-        writer.Write((uint32_t)dialogString.str.length());
-        writer.Write((char*)dialogString.str.data(), dialogString.str.size());
-    }
-
-    writer.Write((uint32_t)top.size());
-    for (const auto& dialogString : top) {
-        writer.Write(dialogString.cmd);
-        writer.Write((uint32_t)dialogString.str.length());
-        writer.Write((char*)dialogString.str.data(), dialogString.str.size());
-    }
 }
 
 ExportResult BK64::DialogBinaryExporter::Export(std::ostream& write, std::shared_ptr<IParsedData> raw,
@@ -135,28 +88,12 @@ ExportResult BK64::DialogModdingExporter::Export(std::ostream& write, std::share
     out << YAML::Key << "Bottom";
     out << YAML::Value;
 
-    out << YAML::BeginSeq;
-    for (const auto [cmd, str] : dialog->mBottom) {
-        out << YAML::Flow;
-        out << YAML::BeginSeq;
-        out << YAML_HEX((uint32_t)cmd);
-        out << str.c_str();
-        out << YAML::EndSeq;
-    }
-    out << YAML::EndSeq;
+    EmitDialogStringSeq(out, dialog->mBottom);
 
     out << YAML::Key << "Top";
     out << YAML::Value;
 
-    out << YAML::BeginSeq;
-    for (const auto [cmd, str] : dialog->mTop) {
-        out << YAML::Flow;
-        out << YAML::BeginSeq;
-        out << YAML_HEX((uint32_t)cmd);
-        out << str.c_str();
-        out << YAML::EndSeq;
-    }
-    out << YAML::EndSeq;
+    EmitDialogStringSeq(out, dialog->mTop);
 
     out << YAML::EndMap;
     out << YAML::EndMap;
@@ -166,43 +103,77 @@ ExportResult BK64::DialogModdingExporter::Export(std::ostream& write, std::share
     return std::nullopt;
 }
 
-// One language: bottom box strings, then top box strings.
-static DialogLang ParseLangBlock(LUS::BinaryReader& reader) {
-    DialogLang lang;
+// Give empty dialogs the terminator the game expects
+static void EnsureTerminator(std::vector<DialogString>& box) {
+    if (box.empty()) {
+        box.push_back({ DIALOG_CMD_CLOSE, std::string(1, '\0') });
+    }
+}
 
-    auto bottomSize = reader.ReadUByte();
-    for (uint8_t i = 0; i < bottomSize; i++) {
+// Read one box's entries. A count byte the blob can't back would otherwise walk the reader off the
+// end, and whatever memory follows gets baked into the o2r as dialog text. Returns false once the
+// blob is exhausted so the caller stops rather than parsing the rest from nothing.
+static bool ReadEntries(LUS::BinaryReader& reader, uint8_t count, std::vector<DialogString>& box,
+                        const std::string& symbol, const char* boxName) {
+    for (uint8_t i = 0; i < count; i++) {
+        // cmd + length, then the string itself
+        if (!HasBytes(reader, 2)) {
+            SPDLOG_WARN("[BK64] Dialog {}: {} entry {} of {} runs past the end of the blob; dropping the rest.",
+                        symbol, boxName, i + 1, count);
+            return false;
+        }
+
         DialogString dialogString;
         dialogString.cmd = reader.ReadUByte();
         auto strLen = reader.ReadUByte();
+
+        if (!HasBytes(reader, strLen)) {
+            SPDLOG_WARN("[BK64] Dialog {}: {} entry {} of {} claims {} bytes the blob doesn't hold; dropping the rest.",
+                        symbol, boxName, i + 1, count, strLen);
+            return false;
+        }
+
         dialogString.str = reader.ReadString(strLen);
-        lang.bottom.push_back(dialogString);
+        box.push_back(dialogString);
+    }
+    return true;
+}
+
+// One language: bottom box strings, then top box strings.
+static DialogLang ParseLangBlock(LUS::BinaryReader& reader, const std::string& symbol) {
+    DialogLang lang;
+
+    uint8_t bottomSize = 0;
+    bool bottomComplete = false;
+
+    if (HasBytes(reader, 1)) {
+        bottomSize = reader.ReadUByte();
+        bottomComplete = ReadEntries(reader, bottomSize, lang.bottom, symbol, "bottom");
+    } else {
+        SPDLOG_WARN("[BK64] Dialog {}: blob ends before the bottom box count.", symbol);
     }
 
-    // Banjo's Backpack writes a 04 01 00 separator between bottom and top
-    // sections unconditionally, even when bottomSize is 0. When present,
-    // skip it so topSize reads correctly. Only check after an empty bottom
-    // to avoid false matches in vanilla dialogs.
-    if (bottomSize == 0) {
-        uint32_t savedPos = reader.GetBaseAddress();
-        if (savedPos + 3 <= reader.GetLength()) {
-            uint8_t b0 = reader.ReadUByte();
-            uint8_t b1 = reader.ReadUByte();
-            uint8_t b2 = reader.ReadUByte();
-            if (b0 != 0x04 || b1 != 0x01 || b2 != 0x00) {
-                reader.Seek(savedPos, LUS::SeekOffsetType::Start);
-            }
+    // Banjo's Backpack still writes the bottom box's terminator entry after a zero count. Consume
+    // it or it gets read as topSize (0x04), inventing four junk top entries and running off the
+    // blob; EnsureTerminator puts the entry back below. A real top box can't open with these bytes.
+    if (bottomComplete && bottomSize == 0 && HasBytes(reader, DIALOG_TERMINATOR_SIZE)) {
+        const uint32_t savedPos = reader.GetBaseAddress();
+        const uint8_t b0 = reader.ReadUByte();
+        const uint8_t b1 = reader.ReadUByte();
+        const uint8_t b2 = reader.ReadUByte();
+        if (b0 != DIALOG_CMD_CLOSE || b1 != 0x01 || b2 != 0x00) {
+            reader.Seek(savedPos, LUS::SeekOffsetType::Start);
         }
     }
 
-    auto topSize = reader.ReadUByte();
-    for (uint8_t i = 0; i < topSize; i++) {
-        DialogString dialogString;
-        dialogString.cmd = reader.ReadUByte();
-        auto strLen = reader.ReadUByte();
-        dialogString.str = reader.ReadString(strLen);
-        lang.top.push_back(dialogString);
+    // A truncated bottom means every offset past it is guesswork, so don't invent a top from it.
+    if (bottomComplete && HasBytes(reader, 1)) {
+        const uint8_t topSize = reader.ReadUByte();
+        ReadEntries(reader, topSize, lang.top, symbol, "top");
     }
+
+    EnsureTerminator(lang.bottom);
+    EnsureTerminator(lang.top);
 
     return lang;
 }
@@ -219,7 +190,7 @@ std::optional<std::shared_ptr<IParsedData>> DialogFactory::parse(std::vector<uin
 
     if (header1 == DIALOG_HEADER_1 && header2 == DIALOG_HEADER_2 && header3 == DIALOG_HEADER_3) {
         // US/JP: 01 03 00, dialog data follows immediately
-        auto lang = ParseLangBlock(reader);
+        auto lang = ParseLangBlock(reader, symbol);
         return std::make_shared<DialogData>(std::move(lang.bottom), std::move(lang.top));
     }
 
@@ -230,13 +201,13 @@ std::optional<std::shared_ptr<IParsedData>> DialogFactory::parse(std::vector<uin
         uint16_t germanOffset = reader.ReadUByte() | (reader.ReadUByte() << 8);
 
         // EN sits right here at byte 7; FR and DE we seek to.
-        auto english = ParseLangBlock(reader);
+        auto english = ParseLangBlock(reader, symbol);
 
         reader.Seek(frenchOffset, LUS::SeekOffsetType::Start);
-        auto french = ParseLangBlock(reader);
+        auto french = ParseLangBlock(reader, symbol);
 
         reader.Seek(germanOffset, LUS::SeekOffsetType::Start);
-        auto german = ParseLangBlock(reader);
+        auto german = ParseLangBlock(reader, symbol);
 
         std::vector<DialogLang> extraLangs;
         extraLangs.push_back(std::move(french));
@@ -251,40 +222,16 @@ std::optional<std::shared_ptr<IParsedData>> DialogFactory::parse(std::vector<uin
 
 std::optional<std::shared_ptr<IParsedData>> DialogFactory::parse_modding(std::vector<uint8_t>& buffer,
                                                                          YAML::Node& node) {
-    YAML::Node assetNode;
-
-    try {
-        std::string text((char*)buffer.data(), buffer.size());
-        assetNode = YAML::Load(text.c_str());
-    } catch (YAML::ParserException& e) {
-        SPDLOG_ERROR("Failed to parse message data: {}", e.what());
-        SPDLOG_ERROR("{}", (char*)buffer.data());
+    const auto info = LoadModdingRoot(buffer);
+    if (!info.has_value()) {
         return std::nullopt;
     }
 
-    const auto info = assetNode.begin()->second;
+    auto bottom = ReadModdingDialogSeq((*info)["Bottom"]);
+    auto top = ReadModdingDialogSeq((*info)["Top"]);
 
-    std::vector<DialogString> bottom;
-    std::vector<DialogString> top;
-
-    auto bottomNode = info["Bottom"];
-    auto topNode = info["Top"];
-
-    for (YAML::iterator it = bottomNode.begin(); it != bottomNode.end(); ++it) {
-        DialogString dialogString;
-        dialogString.cmd = (*it)[0].as<uint32_t>();
-        dialogString.str = (*it)[1].as<std::string>();
-        dialogString.str += '\0';
-        bottom.push_back(dialogString);
-    }
-
-    for (YAML::iterator it = topNode.begin(); it != topNode.end(); ++it) {
-        DialogString dialogString;
-        dialogString.cmd = (*it)[0].as<uint32_t>();
-        dialogString.str = (*it)[1].as<std::string>();
-        dialogString.str += '\0';
-        top.push_back(dialogString);
-    }
+    EnsureTerminator(bottom);
+    EnsureTerminator(top);
 
     return std::make_shared<DialogData>(bottom, top);
 }

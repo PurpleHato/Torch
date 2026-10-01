@@ -1,6 +1,7 @@
 #pragma once
 
 #include <factories/BaseFactory.h>
+#include "factories/bk64/BKHeaderExporter.h"
 
 namespace BK64 {
 
@@ -13,12 +14,15 @@ enum class GeoLayoutOpCode {
     Sort,
     Bone,
     LoadDL,
-    Skinning = 5,
+    NOP,
+    Skinning,
     Branch,
     UnknownCmd7,
     LOD,
-    ReferencePoint = 10,
-    Selector = 12,
+    NOP2,
+    ReferencePoint,
+    NOP3,
+    Selector,
     DrawDistance,
     UnknownCmdE,
     UnknownCmdF,
@@ -46,11 +50,6 @@ class GeoLayoutData : public IParsedData {
     }
 };
 
-class GeoLayoutHeaderExporter : public BaseExporter {
-    ExportResult Export(std::ostream& write, std::shared_ptr<IParsedData> data, std::string& entryName,
-                        YAML::Node& node, std::string* replacement) override;
-};
-
 class GeoLayoutBinaryExporter : public BaseExporter {
     ExportResult Export(std::ostream& write, std::shared_ptr<IParsedData> data, std::string& entryName,
                         YAML::Node& node, std::string* replacement) override;
@@ -72,7 +71,7 @@ class GeoLayoutFactory : public BaseFactory {
     // std::optional<std::shared_ptr<IParsedData>>
     // parse_modding(std::vector<uint8_t>& buffer, YAML::Node& data) override;
     inline std::unordered_map<ExportType, std::shared_ptr<BaseExporter>> GetExporters() override {
-        return { REGISTER(Code, GeoLayoutCodeExporter) REGISTER(Header, GeoLayoutHeaderExporter)
+        return { REGISTER(Code, GeoLayoutCodeExporter) REGISTER(Header, BKHeaderExporter)
                      REGISTER(Binary, GeoLayoutBinaryExporter) REGISTER(Modding, GeoLayoutModdingExporter) };
     }
     bool SupportModdedAssets() override {

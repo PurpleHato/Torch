@@ -89,6 +89,7 @@
 #include "factories/pm64/StoryImageFactory.h"
 #include "factories/pm64/ImgFXAnimFactory.h"
 #include "factories/pm64/TitleDataFactory.h"
+#include "factories/pm64/CharsetFactory.h"
 #endif
 
 #ifdef FZERO_SUPPORT
@@ -112,7 +113,8 @@
 #include "factories/bk64/SpriteFactory.h"
 #include "factories/bk64/ModelFactory.h"
 #include "factories/bk64/MapFactory.h"
-#include "factories/bk64/SoundfontTblFactory.h"
+#include "factories/bk64/MusicFactory.h"
+#include "factories/bk64/SoundfontFactory.h"
 #endif
 
 #ifdef DKR_SUPPORT
@@ -261,6 +263,7 @@ void Companion::Init(const ExportType type, std::atomic<size_t>& assetCount, boo
     this->RegisterFactory("PM64:STORY_IMAGE", std::make_shared<PM64StoryImageFactory>());
     this->RegisterFactory("PM64:IMGFX_ANIM", std::make_shared<PM64ImgFXAnimFactory>());
     this->RegisterFactory("PM64:TITLE_DATA", std::make_shared<PM64TitleDataFactory>());
+    this->RegisterFactory("PM64:CHARSET", std::make_shared<PM64CharsetFactory>());
 #endif
 
 #ifdef SF64_SUPPORT
@@ -295,8 +298,8 @@ void Companion::Init(const ExportType type, std::atomic<size_t>& assetCount, boo
     this->RegisterFactory("BK64:MAP", std::make_shared<BK64::MapFactory>());
     this->RegisterFactory("BK64:QUIZQ", std::make_shared<BK64::QuizQuestionFactory>());
     this->RegisterFactory("BK64:MODEL", std::make_shared<BK64::ModelFactory>());
-    this->RegisterFactory("BK64:SOUNDFONT_CTL", std::make_shared<BK64::SoundfontCtlFactory>());
-    this->RegisterFactory("BK64:SOUNDFONT_TBL", std::make_shared<BK64::SoundfontTblFactory>());
+    this->RegisterFactory("BK64:MUSIC", std::make_shared<BK64::MusicFactory>());
+    this->RegisterFactory("BK64:SOUNDFONT", std::make_shared<BK64::SoundfontFactory>());
     this->RegisterFactory("BK64:SPRITE", std::make_shared<BK64::SpriteFactory>());
 #endif
 
@@ -503,7 +506,9 @@ std::optional<ParseResultData> Companion::ParseNode(YAML::Node& node, std::strin
             std::vector<uint8_t> data = std::vector<uint8_t>(std::istreambuf_iterator(input), {});
             input.close();
 
+            this->gCurrentModdingSource = path.filename().string();
             result = impl->parse_modding(data, node);
+            this->gCurrentModdingSource.clear();
             executeDef = !result.has_value();
         }
     }
@@ -549,6 +554,8 @@ void Companion::ParseModdingConfig() {
 }
 
 void Companion::ParseCurrentFileConfig(YAML::Node node, std::atomic<size_t>& assetCount) {
+    this->gCurrentFileConfig = node;
+
     if (node["external_files"]) {
         auto externalFiles = node["external_files"];
         if (externalFiles.IsSequence() && externalFiles.size()) {
@@ -566,11 +573,14 @@ void Companion::ParseCurrentFileConfig(YAML::Node node, std::atomic<size_t>& ass
 
                 std::string externalFileName =
                     (this->gSourceDirectory / externalFile.as<std::string>()).generic_string();
-                if (StringHelper::StartsWith(
-                        std::filesystem::relative(externalFileName, this->gAssetPath).generic_string(), "../")) {
-                    throw std::runtime_error("External File " + externalFileName + " Not In Asset Directory " +
-                                             this->gAssetPath);
-                } else if (std::filesystem::relative(externalFileName, this->gAssetPath).string() == "") {
+                const auto relPath = std::filesystem::relative(externalFileName, this->gAssetPath).string();
+                const auto relCommonPath = std::filesystem::relative(externalFileName, this->gCommonAssetPath).string();
+                if (StringHelper::StartsWith(relPath , "../")) {
+                    if (StringHelper::StartsWith(relCommonPath, "../"))
+                        throw std::runtime_error("External File " + externalFileName + " Not In Asset Directory " +
+                                                 this->gAssetPath);
+                }
+                if (relPath == "") {
                     throw std::runtime_error("External File " + externalFileName + " Not In Asset Directory " +
                                              this->gAssetPath);
                 }
@@ -610,6 +620,8 @@ void Companion::ParseCurrentFileConfig(YAML::Node node, std::atomic<size_t>& ass
         }
     }
 
+    this->gCurrentFileConfig.reset(node);
+
     if (node["directory"]) {
         this->gCurrentDirectory = node["directory"].as<std::string>();
     }
@@ -640,16 +652,17 @@ void Companion::ParseCurrentFileConfig(YAML::Node node, std::atomic<size_t>& ass
         // Set global variables for segmented data
         if (segments.IsSequence() && segments.size()) {
             if (segments[0].IsSequence() && segments[0].size() == 2) {
-                gCurrentSegmentNumber = segments[0][0].as<uint32_t>();
-                gCurrentFileOffset = segments[0][1].as<uint32_t>();
+                SetSegmentInfo(segments);
+
                 gCurrentCompressionType = Decompressor::GetCompressionType(this->gRomData, gCurrentFileOffset);
                 if (node["no_compression"]) {
                     gCurrentCompressionType = CompressionType::None;
                 }
             } else {
                 throw std::runtime_error(
-                    "Incorrect yaml syntax for segments.\n\nThe yaml expects:\n:config:\n  segments:\n  - [<segment>, "
-                    "<file_offset>]\n\nLike so:\nsegments:\n  - [0x06, 0x821D10]");
+                "Incorrect yaml syntax for segments.\n\nThe yaml expects:\n:config:\n  segments:\n  - [<segment>, "
+                "<file_offset>] or - [<segment>, "
+                "<file_name>] \n\nLike so:\nsegments:\n  - [0x06, 0x821D10] or [0x06, object_jya_obj");
             }
         }
 
@@ -658,13 +671,14 @@ void Companion::ParseCurrentFileConfig(YAML::Node node, std::atomic<size_t>& ass
             auto segment = segments[i];
             if (segment.IsSequence() && segment.size() == 2) {
                 const auto id = segment[0].as<uint32_t>();
-                const auto replacement = segment[1].as<uint32_t>();
+                const auto replacement = GetFileOffsetFromNodeStr(segment[1].as<std::string>());
                 this->gConfig.segment.local[id] = replacement;
                 SPDLOG_DEBUG("Segment {} replaced with 0x{:X}", id, replacement);
             } else {
                 throw std::runtime_error(
                     "Incorrect yaml syntax for segments.\n\nThe yaml expects:\n:config:\n  segments:\n  - [<segment>, "
-                    "<file_offset>]\n\nLike so:\nsegments:\n  - [0x06, 0x821D10]");
+                    "<file_offset>] or - [<segment>, "
+                    "<file_name>] \n\nLike so:\nsegments:\n  - [0x06, 0x821D10] or [0x06, object_jya_obj");
             }
         }
     }
@@ -922,7 +936,6 @@ void Companion::ProcessExportFile() {
                             this->gCurrentWrapper->AddFile(result.name, dataVec);
                             AliasManager::Instance->WriteAliases(result.name, this->gCurrentWrapper, dataVec);
                         }
-
 
                         for (auto& entry : this->gCompanionFiles) {
                             auto output = (this->gCurrentDirectory / entry.first).string();
@@ -1204,6 +1217,19 @@ void Companion::ProcessExportFile() {
     }
 }
 
+void Companion::SetSegmentInfo(const YAML::Node& segments) {
+    gCurrentSegmentNumber = segments[0][0].as<uint32_t>();
+
+    const auto offsetNode = segments[0][1].as<std::string>();
+    gCurrentFileOffset = GetFileOffsetFromNodeStr(offsetNode);
+}
+
+uint32_t Companion::GetFileOffsetFromNodeStr(const std::string& str) const {
+    if (StringHelper::IsValidOffset(str))
+        return strtoul(str.c_str(), nullptr, 16);
+    return GetFileOffsetFromName(str);
+}
+
 void Companion::ProcessFile(YAML::Node root, std::atomic<size_t>& assetCount) {
     // Reset per-file state so segment/offset settings from a previous file don't
     // bleed into this file's Phase 1 gAddrMap registration.
@@ -1214,7 +1240,12 @@ void Companion::ProcessFile(YAML::Node root, std::atomic<size_t>& assetCount) {
     // directory must be resolved before the loop. Default to the file's own
     // path, then honor a :config directory override (used to register a room's
     // assets under its scene's directory).
-    this->gCurrentDirectory = relative(fs::path(this->gCurrentFile), this->gAssetPath).replace_extension("");
+    auto relPath = relative(fs::path(this->gCurrentFile), this->gAssetPath).replace_extension("");
+    if (StringHelper::StartsWith(relPath.string(), "../"))
+        relPath = relative(fs::path(this->gCurrentFile), this->gCommonAssetPath).replace_extension("");
+
+    this->gCurrentDirectory = relPath;
+
     if (auto directory = root[":config"]["directory"]) {
         this->gCurrentDirectory = directory.as<std::string>();
     }
@@ -1222,8 +1253,8 @@ void Companion::ProcessFile(YAML::Node root, std::atomic<size_t>& assetCount) {
     if (auto segments = root[":config"]["segments"]) {
         if (segments.IsSequence() && segments.size() > 0) {
             if (segments[0].IsSequence() && segments[0].size() == 2) {
-                gCurrentSegmentNumber = segments[0][0].as<uint32_t>();
-                gCurrentFileOffset = segments[0][1].as<uint32_t>();
+                SetSegmentInfo(segments);
+
                 gCurrentCompressionType = Decompressor::GetCompressionType(this->gRomData, gCurrentFileOffset);
                 if (root[":config"]["no_compression"]) {
                     gCurrentCompressionType = CompressionType::None;
@@ -1231,7 +1262,8 @@ void Companion::ProcessFile(YAML::Node root, std::atomic<size_t>& assetCount) {
             } else {
                 throw std::runtime_error(
                     "Incorrect yaml syntax for segments.\n\nThe yaml expects:\n:config:\n  segments:\n  - [<segment>, "
-                    "<file_offset>]\n\nLike so:\nsegments:\n  - [0x06, 0x821D10]");
+                    "<file_offset>] or - [<segment>, "
+                    "<file_name>] \n\nLike so:\nsegments:\n  - [0x06, 0x821D10] or [0x06, object_jya_obj");
             }
         }
     }
@@ -1255,9 +1287,14 @@ void Companion::ProcessFile(YAML::Node root, std::atomic<size_t>& assetCount) {
             continue;
         }
 
+        auto offset = GetFileOffsetFromNodeStr(node["offset"].as<std::string>());
+
         if (gCurrentSegmentNumber) {
-            if (IS_SEGMENTED(node["offset"].as<uint32_t>()) == false) {
-                node["offset"] = (gCurrentSegmentNumber << 24) | node["offset"].as<uint32_t>();
+
+            if (IS_SEGMENTED(offset) == false) {
+                offset = (gCurrentSegmentNumber << 24) | offset;
+                node["offset"] = offset;
+
             }
         }
 
@@ -1265,7 +1302,7 @@ void Companion::ProcessFile(YAML::Node root, std::atomic<size_t>& assetCount) {
             node["path"] = gCurrentVirtualPath;
         }
 
-        this->gAddrMap[this->gCurrentFile][node["offset"].as<uint32_t>()] = std::make_tuple(output, node);
+        this->gAddrMap[this->gCurrentFile][offset] = std::make_tuple(output, node);
     }
 
     // Stupid hack because the iteration broke the assets
@@ -1283,6 +1320,7 @@ void Companion::ProcessFile(YAML::Node root, std::atomic<size_t>& assetCount) {
     this->gCurrentExternalFiles.clear();
     this->gSubFileList.clear();
     this->gManualSegments.clear();
+    this->gCurrentFileConfig.reset(YAML::Node());
     GFXDOverride::ClearVtx();
 
     if (root[":config"]) {
@@ -1315,6 +1353,17 @@ void Companion::ProcessFile(YAML::Node root, std::atomic<size_t>& assetCount) {
     }
 
     ProcessExportFile();
+}
+
+std::vector<fs::directory_entry> Companion::GetAssetYMLs(YAML::Node& rom) const {
+    if (!this->gSingleYMLPath.empty()) {
+        std::vector<fs::directory_entry> single;
+        fs::path assetPath = this->gAssetPath;
+        fs::directory_entry a(assetPath / this->gSingleYMLPath);
+        single.emplace_back(a);
+        return single;
+    }
+    return Torch::getRecursiveEntries(this->gAssetPath, this->gCommonAssetPath);
 }
 
 void Companion::Process(std::atomic<size_t>& assetCount) {
@@ -1424,6 +1473,21 @@ void Companion::Process(std::atomic<size_t>& assetCount) {
         }
     }
     this->gAssetPath = (this->gSourceDirectory / rom["path"].as<std::string>()).string();
+    // Optional: a rom that keeps all its ymls under one tree has no common dir, and
+    // getRecursiveEntries already treats an empty path as "nothing to add".
+    if (rom["common_path"]) {
+        this->gCommonAssetPath = (this->gSourceDirectory / rom["common_path"].as<std::string>()).string();
+    }
+
+    if (rom["filelist"]) {
+        const std::string filelistPath = (this->gSourceDirectory / rom["filelist"].as<std::string>()).string();
+        if (!fs::exists(filelistPath)) {
+            SPDLOG_ERROR("A filelist was specified but the file doesn't exist");
+            return;
+        }
+        ParseFilelist(filelistPath);
+    }
+
     auto opath = cfg["output"];
     auto gbi = cfg["gbi"];
     auto gbi_floats = cfg["gbi_floats"];
@@ -1646,7 +1710,9 @@ void Companion::Process(std::atomic<size_t>& assetCount) {
         vWriter.Write((uint32_t)0);
     }
 
-    for (const auto& entry : Torch::getRecursiveEntries(this->gAssetPath)) {
+    std::vector<fs::directory_entry> entries = GetAssetYMLs(rom);
+
+    for (const auto& entry : entries) {
         if (entry.is_directory()) {
             continue;
         }
@@ -1855,7 +1921,7 @@ void Companion::Pack(const std::string& folder, const std::string& output, const
     auto start = duration_cast<milliseconds>(system_clock::now().time_since_epoch());
     std::unordered_map<std::string, std::vector<char>> files;
 
-    for (const auto& entry : Torch::getRecursiveEntries(folder)) {
+    for (const auto& entry : Torch::getRecursiveEntries(folder, "")) {
         if (entry.is_directory()) {
             continue;
         }
@@ -1996,18 +2062,18 @@ std::optional<std::string> Companion::GetEnumFromValue(const std::string& key, i
 
 std::optional<std::uint32_t> Companion::GetFileOffsetFromSegmentedAddr(const uint8_t segment) const {
 
-    auto segments = this->gConfig.segment;
+    const auto& segments = this->gConfig.segment;
 
-    if (Torch::contains(segments.temporal, segment)) {
-        return segments.temporal[segment];
+    if (const auto it = segments.temporal.find(segment); it != segments.temporal.end()) {
+        return it->second;
     }
 
-    if (Torch::contains(segments.local, segment)) {
-        return segments.local[segment];
+    if (const auto it = segments.local.find(segment); it != segments.local.end()) {
+        return it->second;
     }
 
-    if (Torch::contains(segments.global, segment)) {
-        return segments.global[segment];
+    if (const auto it = segments.global.find(segment); it != segments.global.end()) {
+        return it->second;
     }
 
     return std::nullopt;
@@ -2076,13 +2142,19 @@ ResolvedAddr Companion::ResolveVirtualAddr(uint32_t addr) {
 std::optional<std::pair<std::uint32_t, std::uint32_t>>
 Companion::GetFileOffsetFromCompressedSegmentedAddr(const uint8_t segment) const {
 
-    auto segments = this->gConfig.segment;
+    const auto& compressed = this->gConfig.segment.compressed;
 
-    if (segments.compressed[this->gCurrentFile].contains(segment)) {
-        return segments.compressed[this->gCurrentFile][segment];
+    const auto file = compressed.find(this->gCurrentFile);
+    if (file == compressed.end()) {
+        return std::nullopt;
     }
 
-    return std::nullopt;
+    const auto entry = file->second.find(segment);
+    if (entry == file->second.end()) {
+        return std::nullopt;
+    }
+
+    return entry->second;
 }
 
 uint32_t Companion::PatchVirtualAddr(uint32_t addr) {
@@ -2093,8 +2165,8 @@ uint32_t Companion::PatchVirtualAddr(uint32_t addr) {
 // then scanning all entries in the file for one that resolves to the same address.
 // Used when multiple segments map to the same ROM data, so the same asset may be
 // registered under a different segment number than the one being looked up.
-std::optional<std::tuple<std::string, YAML::Node>> Companion::FindNodeInOverlaySegments(
-        uint32_t addr, const std::string& file) {
+std::optional<std::tuple<std::string, YAML::Node>> Companion::FindNodeInOverlaySegments(uint32_t addr,
+                                                                                        const std::string& file) {
     // Only applies to files with virtual address mappings (overlays).
     if (!Torch::contains(gVirtualAddrMap, file)) {
         return std::nullopt;
@@ -2123,8 +2195,8 @@ std::optional<std::tuple<std::string, YAML::Node>> Companion::FindNodeInOverlayS
 // Check if this address is a VRAM pointer belonging to the given external file.
 // If it falls within the file's VRAM range, convert to a virtual segment address
 // and look it up in the file's gAddrMap.
-std::optional<std::tuple<std::string, YAML::Node>> Companion::FindInExternalByVRAM(
-        uint32_t addr, const std::string& file) {
+std::optional<std::tuple<std::string, YAML::Node>> Companion::FindInExternalByVRAM(uint32_t addr,
+                                                                                   const std::string& file) {
     // Can't resolve if the external file doesn't have a virtual address mapping.
     if (!Torch::contains(gVirtualAddrMap, file)) {
         return std::nullopt;
@@ -2549,10 +2621,8 @@ std::optional<YAML::Node> Companion::AddAsset(YAML::Node asset) {
     // With strict_declarations, every asset must be pre-declared in the YAML.
     // Throw if an undeclared asset is encountered to catch declaration gaps.
     if (!decl.has_value() && this->gConfig.strictDeclarations) {
-        throw std::runtime_error(
-            "AddAsset: undeclared " + type + " at " + Torch::to_hex(offset, false) +
-            " (symbol: " + symbol + ") in " + this->gCurrentFile +
-            " — YAML declarations incomplete");
+        throw std::runtime_error("AddAsset: undeclared " + type + " at " + Torch::to_hex(offset, false) + " (symbol: " +
+                                 symbol + ") in " + this->gCurrentFile + " — YAML declarations incomplete");
     }
 
     if (decl.has_value()) {
@@ -2564,7 +2634,6 @@ std::optional<YAML::Node> Companion::AddAsset(YAML::Node asset) {
         }
     }
 
-    auto rom = this->GetRomData();
     auto factory = this->GetFactory(type);
 
     if (!factory.has_value()) {
@@ -2617,4 +2686,17 @@ bool Companion::GetCompressedSegmentOffset(uint32_t* addr) {
         }
     }
     return false;
+}
+
+void Companion::ParseFilelist(const std::string& filelistPath) {
+    YAML::Node root = YAML::LoadFile(filelistPath);
+
+    for (const auto f : root["Files"]) {
+        for (const auto& kv : f) {
+            const auto file = kv.first.as<std::string>();
+            const auto offset = kv.second.as<uint32_t>();
+            gFileOffsets[file] = offset;
+        }
+
+    }
 }

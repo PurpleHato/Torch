@@ -1,9 +1,11 @@
 #include "BKAssetFactory.h"
 #include "Companion.h"
 #include "ConfigFactory.h"
+#include "BKAssetTable.h"
 #include "spdlog/spdlog.h"
 #include "utils/Decompressor.h"
 #include "TinySHA1.hpp"
+#include <algorithm>
 #include <cstring>
 #include <iomanip>
 #include <thread>
@@ -12,6 +14,27 @@
 #include <yaml-cpp/yaml.h>
 
 namespace BK64 {
+
+// Font masks + text-bearing models / signs / overlays a language pack
+// may relocalize.
+static const std::unordered_set<uint32_t> kLangAssets = {
+    0x6EB, // SPRITE_DIALOG_FONT_ALPHAMASK
+    0x6EC, // SPRITE_BOLD_FONT_LETTERS_ALPHAMASK
+    0x2EE, // ON_VACATIOIN_SIGN
+    0x46C, // JIGSAW_PUZZLE
+    0x486, // XMAS_TREE_SWITCH
+    0x48B, // JIGGY_PODIUM
+    0x4EA, // RACE_BANNER_FINISH
+    0x4EB, // RACE_BANNER_START
+    0x50A, // SHARKFOOD_ISLAND (model with sign)
+    0x54C, // GAME OVER
+    0x54D, // BANJO_KAZOOIE_SIGN
+    0x54E, // COPYRIGHT_OVERLAY
+    0x55C, // PRESS_START_OVERLAY
+    0x55D, // NO_CONTROLLER_OVERLAY
+    0x563, // LEVEL_ENTRY_SIGNS
+    0x56C, // THE_END_SIGN
+};
 
 static const std::unordered_map<BKAssetType, std::string> sAssetSymbolPrefixes = {
     { BKAssetType::Animation, "ANIM" },
@@ -305,6 +328,21 @@ std::optional<std::shared_ptr<IParsedData>> BKAssetFactory::parse(std::vector<ui
 
     int count = 0;
 
+    std::vector<uint32_t> offsets;
+    offsets.reserve(assetTableInfo.size());
+    for (const auto& ai : assetTableInfo) {
+        offsets.push_back(ai.offset);
+    }
+    const SlotSizer slotSize(offsets, dataStartRomOffset, buffer.size());
+
+    if (slotSize.StrayCount() > 0) {
+        for (uint32_t i = 0; i < assetCount; i++) {
+            if (slotSize.IsStray(i)) {
+                SPDLOG_WARN("  stray table entry {} at offset 0x{:X}", i, assetTableInfo.at(i).offset);
+            }
+        }
+    }
+
     // Warm the decompressor cache up front, in parallel. The serial parse
     // pass below then mostly hits already-decoded data.
     struct DecompJob {
@@ -316,18 +354,10 @@ std::optional<std::shared_ptr<IParsedData>> BKAssetFactory::parse(std::vector<ui
         auto& ai = assetTableInfo.at(i);
         if (ai.tFlag == 4 || ai.compressionFlag == 0)
             continue;
-        uint32_t sz = assetTableInfo.at(i + 1).offset - ai.offset;
-        if (sz == 0) {
-            for (uint32_t j = i + 2; j < assetCount; j++) {
-                if (assetTableInfo.at(j).offset != ai.offset) {
-                    sz = assetTableInfo.at(j).offset - ai.offset;
-                    break;
-                }
-            }
-        }
-        uint32_t off = dataStartRomOffset + ai.offset;
-        if (off + sz <= buffer.size()) {
-            decompJobs.push_back({ off, sz });
+        uint32_t sz = slotSize(ai.offset);
+        uint64_t off = static_cast<uint64_t>(dataStartRomOffset) + ai.offset;
+        if (sz > 0 && off + sz <= buffer.size()) {
+            decompJobs.push_back({ static_cast<uint32_t>(off), sz });
         }
     }
 
@@ -363,19 +393,7 @@ std::optional<std::shared_ptr<IParsedData>> BKAssetFactory::parse(std::vector<ui
         try {
             auto assetInfo = assetTableInfo.at(i);
 
-            // Size is the gap to the next asset's offset.
-            uint32_t assetSize = assetTableInfo.at(i + 1).offset - assetInfo.offset;
-
-            // Same offset means an empty slot sits in between; skip ahead until the
-            // offset actually changes to find the real boundary.
-            if (assetSize == 0) {
-                for (uint32_t j = i + 2; j < assetCount; j++) {
-                    if (assetTableInfo.at(j).offset != assetInfo.offset) {
-                        assetSize = assetTableInfo.at(j).offset - assetInfo.offset;
-                        break;
-                    }
-                }
-            }
+            uint32_t assetSize = slotSize(assetInfo.offset);
 
             auto assetOffset = dataStartRomOffset + assetInfo.offset;
             BKAssetType assetType;
@@ -384,7 +402,11 @@ std::optional<std::shared_ptr<IParsedData>> BKAssetFactory::parse(std::vector<ui
                 continue;
             }
 
-            if (assetOffset + assetSize > buffer.size()) {
+            if (assetSize == 0) {
+                continue;
+            }
+
+            if (static_cast<uint64_t>(assetOffset) + assetSize > buffer.size()) {
                 SPDLOG_ERROR("Asset {} offset 0x{:X} + size 0x{:X} = 0x{:X} exceeds ROM "
                              "buffer 0x{:X}",
                              assetInfo.index, assetOffset, assetSize, assetOffset + assetSize, buffer.size());
@@ -397,7 +419,7 @@ std::optional<std::shared_ptr<IParsedData>> BKAssetFactory::parse(std::vector<ui
             if (romhackMode && assetSize > 0) {
                 const std::string& baselineHash = GetBaselineAssetHash(assetInfo.index);
                 if (!baselineHash.empty()) {
-                    if (assetOffset + assetSize <= rom.size()) {
+                    if (static_cast<uint64_t>(assetOffset) + assetSize <= rom.size()) {
                         sha1::SHA1 s;
                         s.processBytes(rom.data() + assetOffset, assetSize);
                         uint32_t digest[5];
@@ -490,26 +512,6 @@ std::optional<std::shared_ptr<IParsedData>> BKAssetFactory::parse(std::vector<ui
             if (Companion::Instance->GetConfig().dialogPack) {
                 const bool isText = assetType == BKAssetType::Dialog || assetType == BKAssetType::GruntyQuestion ||
                                     assetType == BKAssetType::QuizQuestion;
-                // Font masks + text-bearing models / signs / overlays a language pack
-                // may relocalize.
-                static const std::unordered_set<uint32_t> kLangAssets = {
-                    0x6EB, // SPRITE_DIALOG_FONT_ALPHAMASK (dialog/quiz/grunty text)
-                    0x6EC, // SPRITE_BOLD_FONT_LETTERS_ALPHAMASK (world names, headers)
-                    0x2EE, // ON_VACATIOIN_SIGN
-                    0x46C, // JIGSAW_PUZZLE
-                    0x486, // XMAS_TREE_SWITCH
-                    0x48B, // JIGGY_PODIUM
-                    0x4EA, // RACE_BANNER_FINISH
-                    0x4EB, // RACE_BANNER_START
-                    0x50A, // SHARKFOOD_ISLAND (model with sign)
-                    0x54C, // GAME OVER
-                    0x54D, // BANJO_KAZOOIE_SIGN
-                    0x54E, // COPYRIGHT_OVERLAY
-                    0x55C, // PRESS_START_OVERLAY
-                    0x55D, // NO_CONTROLLER_OVERLAY
-                    0x563, // LEVEL_ENTRY_SIGNS
-                    0x56C, // THE_END_SIGN
-                };
                 const uint32_t idx = assetInfo.index;
                 bool isLangAsset = kLangAssets.count(idx) != 0;
                 // The JP cart additionally carries the kana dialog font and the
@@ -574,7 +576,7 @@ std::optional<std::shared_ptr<IParsedData>> BKAssetFactory::parse(std::vector<ui
                     Companion::Instance->AddSubFileAsset(bkAssetNode, assetSymbol, compressionType, assetSize);
                     break;
                 case BKAssetType::Midi:
-                    bkAssetNode["type"] = "BLOB";
+                    bkAssetNode["type"] = "BK64:MUSIC";
                     Companion::Instance->AddSubFileAsset(bkAssetNode, assetSymbol, compressionType, assetSize);
                     break;
                 case BKAssetType::Model:

@@ -81,6 +81,16 @@ if(USE_STANDALONE)
     endif()
 endif()
 
+# Audio decoding for the soundfont importer; header-only
+FetchContent_Declare(
+    dr_libs
+    GIT_REPOSITORY https://github.com/mackron/dr_libs.git
+    GIT_TAG da35f9d6c7374a95353fd1df1d394d44ab66cf01
+    GIT_SUBMODULES ""
+)
+FetchContent_MakeAvailable(dr_libs)
+include_directories(${dr_libs_SOURCE_DIR})
+
 # Interactive viewer renderer: libultraship + Fast3D (true N64 rendering). LUS
 # bundles its own ImGui, so it fully replaces the old raylib/rlImGui backend.
 if(BUILD_UI)
@@ -101,20 +111,13 @@ if(BUILD_UI)
     )
     FetchContent_MakeAvailable(tinyxml2)
 
-    FetchContent_Declare(
-        dr_libs
-        GIT_REPOSITORY https://github.com/mackron/dr_libs.git
-        GIT_TAG da35f9d6c7374a95353fd1df1d394d44ab66cf01
-    )
-    FetchContent_MakeAvailable(dr_libs)
-
     # Kenix3 upstream for now. NOTE: the HM64 ports build against a fork
     # (KiritoDv/better-mipmaps @ 5959b97) with fixes not on upstream; re-pin here
     # if upstream proves incompatible.
     FetchContent_Declare(
         libultraship
         GIT_REPOSITORY https://github.com/Kenix3/libultraship.git
-        GIT_TAG main
+        GIT_TAG a3f1e102e1ed50a3f536fbca2e6e412170e7320b
     )
     FetchContent_MakeAvailable(libultraship)
 
